@@ -72,10 +72,15 @@ if HAS_LANGFUSE:
 from openai import AzureOpenAI as VanillaAzureOpenAI
 
 from chat_store import add_message, delete_chat, get_messages, init_db, list_chats, new_chat
+from file_processor import (
+    build_multimodal_request_content,
+    format_message_with_attachments,
+    parse_uploaded_file,
+)
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-st.set_page_config(page_title="LegalChat - Company GPT", page_icon="⚖️", layout="centered")
+st.set_page_config(page_title="LegalChat - LLM", page_icon="⚖️", layout="centered")
 st.markdown("""
 <style>
 .block-container { padding-top: 1.6rem; max-width: 900px; }
@@ -234,6 +239,7 @@ with st.sidebar:
     max_turns = st.slider("최근 대화 전송 수 (왕복)", 5, 100, 30, 5)
     st.caption(f"모델: {cfg['model']}")
     st.caption(f"시스템: {cfg['system_name']}")
+    st.caption("📎 파일 첨부: PDF, Word, Excel, CSV, TXT, 코드, 이미지")
     st.caption("개인용 · 로그인 및 사용자 분리 없음")
 
 st.title("⚖️ LegalChat")
@@ -249,44 +255,79 @@ if missing:
 
 messages = get_messages(st.session_state.chat_id)
 if not messages:
-    st.info("새 대화를 시작해 보세요.")
+    st.info("새 대화를 시작해 보세요. 하단 입력창의 📎 아이콘을 눌러 파일(문서, 코드, 이미지)을 첨부할 수 있습니다.")
 for message in messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Streamlit의 채팅 입력을 이용해 ChatGPT와 비슷한 경험 제공.
-prompt = st.chat_input("메시지를 입력하세요...", disabled=bool(missing))
-if prompt and prompt.strip():
-    prompt = prompt.strip()
-    chat_id = st.session_state.chat_id
-    add_message(chat_id, "user", prompt)
-    with st.chat_message("user"):
-        st.markdown(prompt)
+# Streamlit의 채팅 입력을 이용해 ChatGPT와 비슷한 경험 제공 (파일 첨부 지원).
+try:
+    chat_input_val = st.chat_input(
+        "메시지를 입력하거나 클립(📎)을 눌러 파일을 첨부하세요...",
+        accept_file="multiple",
+        disabled=bool(missing),
+    )
+except TypeError:
+    # accept_file 미지원 이전 버전 Streamlit 호환 폴백
+    chat_input_val = st.chat_input("메시지를 입력하세요...", disabled=bool(missing))
 
-    # 현재 채팅의 최근 문맥만 모델에 전송해 요청 크기를 제한.
-    context = get_messages(chat_id)[-max_turns * 2:]
-    request_messages = []
-    if system_prompt.strip():
-        request_messages.append({"role": "system", "content": system_prompt.strip()})
-    request_messages += [{"role": m["role"], "content": m["content"]} for m in context]
+if chat_input_val:
+    user_text = ""
+    raw_files = []
 
-    with st.chat_message("assistant"):
-        try:
-            client = make_client(cfg)
-            answer = st.write_stream(get_answer(client, cfg["model"], request_messages, cfg, chat_id, cfg["stream"]))
-            # 빈 응답은 보관하지 않음. 다음 메시지로 자연스럽게 재시도 가능.
-            if answer and isinstance(answer, str) and answer.strip():
-                add_message(chat_id, "assistant", answer)
+    if hasattr(chat_input_val, "to_dict"):
+        val_dict = chat_input_val.to_dict()
+        user_text = (val_dict.get("text") or "").strip()
+        raw_files = val_dict.get("files") or []
+    elif isinstance(chat_input_val, dict):
+        user_text = (chat_input_val.get("text") or "").strip()
+        raw_files = chat_input_val.get("files") or []
+    elif isinstance(chat_input_val, str):
+        user_text = chat_input_val.strip()
+        raw_files = []
+
+    if user_text or raw_files:
+        # 파일이 첨부된 경우 내용 추출 및 마크다운 포맷팅
+        with st.spinner("첨부 파일을 분석하는 중..." if raw_files else None):
+            parsed_files = [parse_uploaded_file(f) for f in raw_files] if raw_files else []
+            formatted_message = format_message_with_attachments(user_text, parsed_files)
+
+        chat_id = st.session_state.chat_id
+        add_message(chat_id, "user", formatted_message)
+        with st.chat_message("user"):
+            st.markdown(formatted_message)
+
+        # 현재 채팅의 최근 문맥만 모델에 전송해 요청 크기를 제한.
+        context = get_messages(chat_id)[-max_turns * 2:]
+        request_messages = []
+        if system_prompt.strip():
+            request_messages.append({"role": "system", "content": system_prompt.strip()})
+
+        for idx, m in enumerate(context):
+            is_latest_user_message = (idx == len(context) - 1 and m["role"] == "user")
+            if is_latest_user_message and parsed_files and any(f["is_image"] for f in parsed_files):
+                mm_content = build_multimodal_request_content(m["content"], parsed_files)
+                request_messages.append({"role": "user", "content": mm_content})
             else:
-                st.warning("모델이 텍스트 응답을 보내지 않았습니다. 모델 배포명 및 서버 설정을 확인하세요.")
+                request_messages.append({"role": m["role"], "content": m["content"]})
 
-            # Langfuse 버퍼 비우기 (Trace 즉시 전송 보장)
-            if cfg["is_langfuse_active"]:
-                flush_langfuse()
+        with st.chat_message("assistant"):
+            try:
+                client = make_client(cfg)
+                answer = st.write_stream(get_answer(client, cfg["model"], request_messages, cfg, chat_id, cfg["stream"]))
+                # 빈 응답은 보관하지 않음. 다음 메시지로 자연스럽게 재시도 가능.
+                if answer and isinstance(answer, str) and answer.strip():
+                    add_message(chat_id, "assistant", answer)
+                else:
+                    st.warning("모델이 텍스트 응답을 보내지 않았습니다. 모델 배포명 및 서버 설정을 확인하세요.")
 
-        except (OpenAIError, OSError, ValueError, RuntimeError) as exc:
-            st.error("회사 LLM 호출에 실패했습니다. 접속 정보, 모델 배포명, 네트워크 및 서버의 스트리밍 지원을 확인하세요.")
-            with st.expander("오류 세부정보"):
-                # 라이브 API 키 및 사용자 메시지는 기록하지 않음.
-                st.code(type(exc).__name__ + ": " + str(exc)[:800])
-            st.info("스트리밍 오류라면 `.env`에서 `LLM_STREAM=false`로 바꾸고 재시작하세요.")
+                # Langfuse 버퍼 비우기 (Trace 즉시 전송 보장)
+                if cfg["is_langfuse_active"]:
+                    flush_langfuse()
+
+            except (OpenAIError, OSError, ValueError, RuntimeError) as exc:
+                st.error("회사 LLM 호출에 실패했습니다. 접속 정보, 모델 배포명, 네트워크 및 서버의 스트리밍 지원을 확인하세요.")
+                with st.expander("오류 세부정보"):
+                    # 라이브 API 키 및 사용자 메시지는 기록하지 않음.
+                    st.code(type(exc).__name__ + ": " + str(exc)[:800])
+                st.info("스트리밍 오류라면 `.env`에서 `LLM_STREAM=false`로 바꾸고 재시작하세요.")

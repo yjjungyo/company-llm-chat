@@ -75,6 +75,34 @@ def get_messages(chat_id: str, db_path: Path = DB_PATH):
         )]
 
 
+def extract_chat_title(content: str) -> str:
+    """메시지 내용에서 대화 목록에 표시할 깔끔한 제목을 추출."""
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        return "새 채팅"
+
+    # 첨부 파일이 있는 마크다운 포맷 처리
+    if lines[0].startswith("📎"):
+        filename = ""
+        question = ""
+        for line in lines[1:]:
+            if line.startswith("- ") and "`" in line and not filename:
+                parts = line.split("`")
+                if len(parts) >= 2:
+                    filename = parts[1]
+            elif not line.startswith(("-", "!", "<", "#", "```")) and not question:
+                question = line
+
+        if filename and question:
+            return f"📎 {filename}: {question}"[:35]
+        elif filename:
+            return f"📎 {filename}"[:35]
+        elif question:
+            return question[:35]
+
+    return " ".join(content.split())[:35] or "새 채팅"
+
+
 def add_message(chat_id: str, role: str, content: str, db_path: Path = DB_PATH):
     if role not in ("user", "assistant"):
         raise ValueError("허용되지 않은 메시지 역할")
@@ -90,7 +118,7 @@ def add_message(chat_id: str, role: str, content: str, db_path: Path = DB_PATH):
                 "SELECT COUNT(*) FROM messages WHERE chat_id=? AND role='user'", (chat_id,)
             ).fetchone()[0]
             if count == 1:
-                title = " ".join(content.split())[:35] or "새 채팅"
+                title = extract_chat_title(content)
                 conn.execute("UPDATE chats SET title=? WHERE id=?", (title, chat_id))
 
 

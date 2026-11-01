@@ -7,6 +7,7 @@
 - 여러 대화 생성/전환/삭제, 첫 질문으로 제목 자동 지정
 - SQLite로 채팅 기록 로컬 보관(`data/chats.sqlite3`)
 - 이전 메시지 문맥 전송, 시스템 지침 설정, 문맥 길이 조절
+- 📎 **채팅 창 파일 첨부 및 LLM 전달 지원**: PDF, Word(.docx), Excel(.xlsx/.xls), CSV, 텍스트/코드, 이미지(멀티모달) 파일 첨부 및 자동 파싱/분석
 - 스트리밍을 지원하지 않는 사내 API를 위한 설정
 - Langfuse Observability(Trace/Generation 로깅, `LegalChat` 시스템 메타데이터 및 대화 세션 자동 추적)
 - LLM temperature `0` 고정, Langfuse trace/generation 이름과 태그는 기본 `LegalChat`
